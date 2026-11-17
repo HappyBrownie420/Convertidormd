@@ -33,6 +33,7 @@ from conversores import AMarkdown, DesdeMarkdown, ErrorAlGuardar, explicar_error
 
 TITULO = "Convertidor Markdown"
 ARCHIVO_CONFIG = Path(__file__).with_name("config.json")
+ICONO = Path(__file__).with_name("icono.ico")
 PENDIENTE = "Pendiente"
 SIN_VENTANA = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -423,6 +424,7 @@ class App(tk.Tk):
         self.geometry(f"{int(920 * self.escala)}x{int(680 * self.escala)}")
         self.minsize(int(760 * self.escala), int(560 * self.escala))
         self.report_callback_exception = self._error_inesperado
+        self._poner_icono()
         self._estilos()
 
         config = self._leer_config()
@@ -447,6 +449,16 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._cerrar)
         if archivos_iniciales:
             self._repartir(Path(a) for a in archivos_iniciales)
+
+    def _poner_icono(self):
+        try:
+            if os.name == "nt" and ICONO.exists():
+                self.iconbitmap(default=str(ICONO))
+            elif ICONO.with_suffix(".png").exists():
+                self._icono = tk.PhotoImage(file=str(ICONO.with_suffix(".png")))
+                self.iconphoto(True, self._icono)
+        except tk.TclError:
+            pass  # sin icono propio la app funciona igual
 
     def _estilos(self):
         estilo = ttk.Style(self)
@@ -514,6 +526,7 @@ REQUISITOS = (
     ("markitdown", "markitdown[all]"),
     ("markdown_it", "markdown-it-py"),
     ("docx", "python-docx"),
+    ("openpyxl", "openpyxl"),
     ("bs4", "beautifulsoup4"),
 )
 
@@ -632,9 +645,11 @@ def versiones():
 
 
 def main():
-    try:  # texto nítido en pantallas con escala >100 %
+    try:
         import ctypes
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        # Identidad propia: la barra de tareas muestra el icono de la app, no el de Python.
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ConvertidorMarkdown.App")
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)   # texto nítido con escala >100 %
     except Exception:
         pass
     if not preparar_python():

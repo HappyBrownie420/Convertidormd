@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Prueba del motor sin interfaz.
 
-Convierte muestra.md a Word, PDF, HTML y texto en una carpeta temporal y
+Convierte muestra.md a Word, PDF, Excel, HTML y texto en una carpeta temporal y
 comprueba que cada resultado se puede volver a leer y conserva el contenido.
 
     py pruebas/prueba_motor.py
@@ -69,9 +69,53 @@ with tempfile.TemporaryDirectory(prefix="convmd_prueba_") as temporal:
         comprobar(len(word.tables) == 1, ".docx con la tabla")
         comprobar(len(word.inline_shapes) == 1, ".docx con la imagen")
 
+    if ".xlsx" in creados:
+        from openpyxl import load_workbook
+        libro = load_workbook(creados[".xlsx"])
+        comprobar(libro.sheetnames == ["Tabla", "Texto"],
+                  f".xlsx: una hoja por tabla más la de texto ({libro.sheetnames})")
+        hoja = libro["Tabla"]
+        comprobar([celda.value for celda in hoja[1]] == ["Especie", "Peso (kg)", "Estado"], ".xlsx con cabecera")
+        comprobar(hoja["B2"].value == 12.5 and hoja["B3"].value == 3.8, ".xlsx guarda los números como números")
+        comprobar(hoja["C3"].value == "Crítico" and hoja.freeze_panes == "A2", ".xlsx con texto y cabecera fija")
+        comprobar(libro["Texto"]["A1"].value == "Guía de rescate: primeros pasos", ".xlsx con el resto del documento")
+
     print("Vuelta a Markdown (MarkItDown)")
     ida = c.AMarkdown()
     ida.preparar()
+
+    # Excel -> Markdown -> Excel: mismas hojas y mismos valores
+    from openpyxl import Workbook, load_workbook
+    original = Workbook()
+    ventas = original.active
+    ventas.title = "Ventas"
+    for fila in (["Producto", "Unidades", "Precio"], ["Pienso", 12, 19.95], ["Correa", None, 7.5], ["Collar", "A-007", 3]):
+        ventas.append(fila)
+    gastos = original.create_sheet("Gastos 2026")
+    for fila in (["Concepto", "Importe"], ["Veterinario", 250], ["Transporte", 40.25]):
+        gastos.append(fila)
+    original.save(salida / "libro.xlsx")
+    (salida / "libro.md").write_text(ida.leer(salida / "libro.xlsx"), encoding="utf-8")
+    modo.escribir(modo.leer(salida / "libro.md"), salida / "libro.md", salida / "libro_vuelta.xlsx", ".xlsx")
+    vuelta = load_workbook(salida / "libro_vuelta.xlsx")
+    comprobar(vuelta.sheetnames == ["Ventas", "Gastos 2026"], f"ida y vuelta de Excel: mismas hojas ({vuelta.sheetnames})")
+    iguales = all(
+        [[c_.value for c_ in fila] for fila in vuelta[nombre].iter_rows()]
+        == [[c_.value for c_ in fila] for fila in original[nombre].iter_rows()]
+        for nombre in original.sheetnames if nombre in vuelta.sheetnames
+    )
+    comprobar(iguales, "ida y vuelta de Excel: mismos valores (números, textos y celdas vacías)")
+    casos = {"12": 12, "-3": -3, "3.8": 3.8, "12,5": 12.5, "007": "007", "1,234": "1,234",
+             "NaN": None, "": None, "Perro": "Perro", "12 kg": "12 kg"}
+    mal = {texto: c._valor_celda(texto) for texto, esperado in casos.items() if c._valor_celda(texto) != esperado}
+    comprobar(not mal, "solo se convierte a número lo inequívoco" + (f" (mal: {mal})" if mal else ""))
+
+    # Un texto que parece fórmula debe quedar como texto
+    (salida / "formula.md").write_text("| a |\n|---|\n| =1+1 |\n", encoding="utf-8")
+    modo.escribir(modo.leer(salida / "formula.md"), salida / "formula.md", salida / "formula.xlsx", ".xlsx")
+    celda = load_workbook(salida / "formula.xlsx").active["A2"]
+    comprobar(celda.data_type == "s" and celda.value == "=1+1", "las fórmulas del Markdown no se ejecutan en Excel")
+
     for extension in (".docx", ".pdf", ".html"):
         if extension not in creados:
             continue

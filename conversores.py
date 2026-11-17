@@ -3,7 +3,7 @@
 
 Dos sentidos:
   * AMarkdown:      PDF, Word, PowerPoint, Excel, HTML... -> Markdown (MarkItDown)
-  * DesdeMarkdown:  Markdown -> Word (.docx), PDF, HTML o texto sin formato
+  * DesdeMarkdown:  Markdown -> Word (.docx), PDF, Excel (.xlsx), HTML o texto
 
 Cada sentido es un "modo" con la misma forma: `preparar()` carga lo pesado,
 `leer(origen)` interpreta el archivo una sola vez y `escribir(...)` genera
@@ -236,15 +236,16 @@ class _Documento:
 
 class DesdeMarkdown:
     clave = "desde_md"
-    pestana = "Markdown  →  Word, PDF, HTML"
-    descripcion = ("Carga archivos Markdown (.md) y conviértelos a Word, PDF, "
-                   "página web o texto sin formato. Puedes marcar varios a la vez.")
+    pestana = "Markdown  →  Word, PDF, Excel…"
+    descripcion = ("Carga archivos Markdown (.md) y conviértelos a Word, PDF, Excel, página web "
+                   "o texto. Puedes marcar varios. En Excel, cada tabla va a su propia hoja.")
     filtro = ("Markdown y texto", (".md", ".markdown", ".txt"))
     formatos = (
         (".docx", "Word (.docx)"),
         (".pdf", "PDF (.pdf)"),
+        (".xlsx", "Excel (.xlsx)"),
         (".html", "Página web (.html)"),
-        (".txt", "Texto sin formato (.txt)"),
+        (".txt", "Texto (.txt)"),
     )
     por_defecto = (".docx",)
     boton = "Convertir"
@@ -253,6 +254,7 @@ class DesdeMarkdown:
         import bs4  # noqa: F401  (comprobar que están antes de empezar)
         import docx  # noqa: F401
         import markdown_it  # noqa: F401
+        import openpyxl  # noqa: F401
 
     def leer(self, origen):
         return _Documento(origen)
@@ -260,6 +262,8 @@ class DesdeMarkdown:
     def escribir(self, documento, origen, destino, extension):
         if extension == ".docx":
             _EscritorDocx(documento).guardar(destino)
+        elif extension == ".xlsx":
+            html_a_excel(documento.arbol, destino)
         elif extension == ".pdf":
             html_a_pdf(documento.html(), destino)
         elif extension == ".html":
@@ -417,6 +421,166 @@ def _entero(valor, por_defecto):
         return int(valor)
     except (TypeError, ValueError):
         return por_defecto
+
+
+# ---- Excel (.xlsx) --------------------------------------------------------
+# Cada tabla del Markdown va a una hoja, con el nombre del título que la
+# precede. El resto del documento (si lo hay) va a una hoja «Texto».
+
+_PROHIBIDOS_EN_HOJA = re.compile(r"[\[\]:*?/\\]")
+
+
+def _nombre_hoja(propuesta, usados):
+    """Nombre de hoja válido para Excel (31 caracteres, sin []:*?/\\) y sin repetir."""
+    nombre = _PROHIBIDOS_EN_HOJA.sub(" ", propuesta or "")
+    nombre = re.sub(r"\s+", " ", nombre).strip().strip("'")[:31].strip() or "Hoja"
+    base, numero = nombre, 2
+    while nombre.lower() in usados:
+        sufijo = f" ({numero})"
+        nombre = base[:31 - len(sufijo)].rstrip() + sufijo
+        numero += 1
+    usados.add(nombre.lower())
+    return nombre
+
+
+def _valor_celda(texto):
+    """Convierte a número lo que claramente lo es, para poder calcular en Excel."""
+    limpio = texto.strip()
+    if limpio in ("", "NaN"):                       # NaN: celda vacía según MarkItDown
+        return None
+    sin_signo = limpio.lstrip("-")
+    if re.fullmatch(r"-?\d{1,15}", limpio) and not (len(sin_signo) > 1 and sin_signo[0] == "0"):
+        return int(limpio)                          # "007" y números larguísimos son códigos
+    if re.fullmatch(r"-?\d+\.\d+", limpio):
+        return float(limpio)
+    # Coma decimal ("12,5"). "1,234" es ambiguo (¿miles?) y se deja como texto.
+    if re.fullmatch(r"-?\d+,\d+", limpio) and not re.fullmatch(r"-?\d{1,3},\d{3}", limpio):
+        return float(limpio.replace(",", "."))
+    return texto
+
+
+def _escribir_celda(hoja, fila, columna, valor):
+    celda = hoja.cell(row=fila, column=columna, value=valor)
+    if isinstance(valor, str) and valor.startswith("="):
+        celda.data_type = "s"      # texto literal: nunca ejecutar fórmulas del Markdown
+    return celda
+
+
+def _filas_de_lista(nodo, nombres, sangria):
+    numero = _entero(nodo.get("start"), 1)
+    for li in nodo.find_all("li", recursive=False):
+        marca = f"{numero}. " if nodo.name == "ol" else "• "
+        propios = [h for h in li.children if getattr(h, "name", None) not in ("ul", "ol", "table", "pre")]
+        yield sangria + marca + _plano(propios).replace("\n", " "), "p"
+        for sub in li.find_all(["ul", "ol"], recursive=False):
+            yield from _filas_de_lista(sub, nombres, sangria + "    ")
+        numero += 1
+
+
+def _filas_de_texto(nodos, nombres, sangria=""):
+    """Recorre los bloques y da (texto, tipo) por cada fila de la hoja «Texto»."""
+    sueltos = []
+    for nodo in list(nodos) + [None]:
+        if nodo is not None and not _es_bloque(nodo):
+            sueltos.append(nodo)
+            continue
+        texto = _plano(sueltos).replace("\n", " ")
+        sueltos = []
+        if texto:
+            yield sangria + texto, "p"
+        if nodo is None:
+            break
+        nombre = nodo.name
+        if nombre in _TITULOS:
+            texto = _plano(nodo.children).replace("\n", " ")
+            if texto:
+                yield texto, nombre
+        elif nombre in ("ul", "ol"):
+            yield from _filas_de_lista(nodo, nombres, sangria)
+        elif nombre == "pre":
+            for linea in nodo.get_text().rstrip("\n").split("\n"):
+                yield sangria + linea, "codigo"
+        elif nombre == "blockquote":
+            yield from _filas_de_texto(nodo.children, nombres, sangria + "    ")
+        elif nombre == "table":
+            yield f"[Tabla en la hoja «{nombres.get(id(nodo), '')}»]", "nota"
+        elif nombre in ("p", "dt", "dd"):
+            texto = _plano(nodo.children).replace("\n", " ")
+            if texto:
+                yield sangria + texto, "p"
+        elif nombre != "hr":
+            yield from _filas_de_texto(nodo.children, nombres, sangria)
+
+
+def html_a_excel(arbol, destino):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    libro = Workbook()
+    libro.remove(libro.active)
+    usados, nombres = set(), {}
+    negrita = Font(bold=True)
+    relleno = PatternFill("solid", start_color="E8EEF7", end_color="E8EEF7")
+
+    # Una hoja por tabla
+    titulo, numero = "", 0
+    for nodo in arbol.find_all([*_TITULOS, "table"]):
+        if nodo.name != "table":
+            titulo = _plano(nodo.children).replace("\n", " ")
+            continue
+        numero += 1
+        nombre = _nombre_hoja(titulo or f"Tabla {numero}", usados)
+        nombres[id(nodo)] = nombre
+        hoja = libro.create_sheet(nombre)
+        anchos, con_cabecera = {}, False
+        for i, fila in enumerate(nodo.find_all("tr"), start=1):
+            for j, celda in enumerate(fila.find_all(["th", "td"], recursive=False), start=1):
+                texto = _plano(celda.children)
+                es_cabecera = celda.name == "th"
+                if es_cabecera:
+                    valor = None if re.fullmatch(r"Unnamed: \d+", texto) else (texto or None)
+                else:
+                    valor = _valor_celda(texto)
+                c = _escribir_celda(hoja, i, j, valor)
+                estilo = (celda.get("style") or "") + " " + (celda.get("align") or "")
+                horizontal = "center" if "center" in estilo else "right" if "right" in estilo else None
+                c.alignment = Alignment(horizontal=horizontal, vertical="top", wrap_text="\n" in texto)
+                if es_cabecera:
+                    c.font, c.fill = negrita, relleno
+                    con_cabecera = con_cabecera or i == 1
+                enlaces = [a["href"] for a in celda.find_all("a", href=True) if not a["href"].startswith("#")]
+                if len(enlaces) == 1 and isinstance(valor, str):
+                    c.hyperlink = enlaces[0]
+                    c.font = Font(color="0563C1", underline="single", bold=es_cabecera)
+                largo = max((len(linea) for linea in texto.split("\n")), default=0)
+                anchos[j] = max(anchos.get(j, 0), largo)
+        for j, largo in anchos.items():
+            hoja.column_dimensions[get_column_letter(j)].width = min(max(largo + 3, 9), 60)
+        if con_cabecera:
+            hoja.freeze_panes = "A2"
+
+    # El resto del documento, una línea por fila
+    filas = list(_filas_de_texto(list(arbol.children), nombres))
+    if not nombres or any(tipo in ("p", "codigo") for _, tipo in filas):
+        hoja = libro.create_sheet(_nombre_hoja("Texto", usados))
+        fuentes = {
+            "h1": Font(bold=True, size=16), "h2": Font(bold=True, size=13),
+            "h3": Font(bold=True, size=12), "h4": negrita, "h5": negrita, "h6": negrita,
+            "codigo": Font(name="Consolas", size=10),
+            "nota": Font(italic=True, color="6B7280"),
+        }
+        i = 0
+        for texto, tipo in filas:
+            if tipo in _TITULOS and i:
+                i += 1                              # fila en blanco antes de cada título
+            i += 1
+            c = _escribir_celda(hoja, i, 1, texto)
+            c.alignment = Alignment(vertical="top", wrap_text=tipo != "codigo")
+            if tipo in fuentes:
+                c.font = fuentes[tipo]
+        hoja.column_dimensions["A"].width = 110
+    libro.save(str(destino))
 
 
 # ---- Word (.docx) ---------------------------------------------------------

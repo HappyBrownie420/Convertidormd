@@ -1,3 +1,5 @@
-# El lanzador de Windows necesita finales de línea CRLF para funcionar.
+# Los guiones de Windows necesitan finales de línea CRLF para funcionar.
 *.bat text eol=crlf
+*.ps1 text eol=crlf
 *.png binary
+*.ico binary
