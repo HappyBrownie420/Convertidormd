@@ -1,0 +1,3 @@
+# El lanzador de Windows necesita finales de línea CRLF para funcionar.
+*.bat text eol=crlf
+*.png binary

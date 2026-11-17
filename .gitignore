@@ -1,0 +1,11 @@
+# Opciones recordadas de cada usuario (contienen rutas locales)
+config.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Resultados de pruebas manuales
+_prueba/
