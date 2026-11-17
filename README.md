@@ -121,3 +121,8 @@ la ida y vuelta Excel → Markdown → Excel.
 - [markdown-it-py](https://github.com/executablebooks/markdown-it-py) — lectura de Markdown.
 - [python-docx](https://github.com/python-openxml/python-docx) — creación de documentos de Word.
 - [openpyxl](https://openpyxl.readthedocs.io/) — creación de libros de Excel.
+
+## Licencia
+
+[MIT](LICENSE): puedes usar, modificar y redistribuir el código libremente
+manteniendo el aviso de autoría. Se entrega «tal cual», sin garantía.
