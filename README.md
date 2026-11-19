@@ -14,6 +14,12 @@ de Microsoft; esta app le pone una ventana encima y añade el camino de vuelta.
 ## Qué hace
 
 - Carga uno o varios archivos (o una carpeta entera) y crea **un documento por cada uno**.
+  También puedes **arrastrarlos desde el Explorador** y soltarlos en la lista: los `.md`
+  van solos a la pestaña inversa y el resto a «Archivos → Markdown».
+- **HTML hechos con JavaScript** (por ejemplo clases interactivas que se pasan bloque a
+  bloque con «Siguiente»): la app los abre con Edge sin ventana, recorre todos los
+  bloques, revela la respuesta correcta de cada pregunta (marcada con ✅) y conserva
+  las fórmulas en LaTeX (`$…$` y `$$…$$`). Los recuadros de avisos salen como citas.
 - Tú decides dónde se guarda: junto al original o en la carpeta que elijas.
 - En el sentido inverso puedes marcar varios formatos a la vez (por ejemplo Word y PDF).
 - **A Excel**: cada tabla del Markdown va a su propia hoja, con el nombre del título
@@ -99,6 +105,7 @@ La versión de Python y de MarkItDown en uso se ve arriba a la derecha de la ven
 |---|---|
 | `convertidor_markdown.pyw` | La ventana (Tkinter) y el arranque |
 | `conversores.py` | El motor de conversión en ambos sentidos, sin interfaz |
+| `recorrer_pagina.js` | Recorre las páginas HTML con JavaScript para convertirlas completas |
 | `Convertidor Markdown.bat` | Lanzador de doble clic para Windows |
 | `requirements.txt` | Componentes de Python necesarios |
 | `icono.ico`, `icono.png` | Icono de la ventana y de los accesos directos |

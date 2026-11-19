@@ -127,6 +127,45 @@ with tempfile.TemporaryDirectory(prefix="convmd_prueba_") as temporal:
         faltan = [clave for clave in CLAVES if clave not in texto]
         comprobar(not faltan, f"{extension} conserva el contenido" + (f" (faltan: {faltan})" if faltan else ""))
 
+    print("HTML hecho con JavaScript (clase por bloques con quiz)")
+    interactiva = salida / "clase.html"
+    interactiva.write_text(r"""<!DOCTYPE html><html><head><meta charset="utf-8"><title>Clase de prueba</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-mml-chtml.js"></script></head>
+<body><div id="contenido"></div><button id="ant">← Anterior</button><button id="sig">Siguiente →</button>
+<script>
+const bloques = [
+  `<h2>Bloque uno</h2><div class="analogy"><b>Idea</b> La fórmula \\(e^{-st}\\) y el número 3_a.</div>
+   <div class="formula-box">\\[ \\int_0^{\\infty} f(t)\\,dt \\]</div>`,
+  `<h2>Bloque dos</h2><p>Pregunta: ¿cuánto es \\(1+1\\)?</p>
+   <div class="options"><button class="opt">1</button><button class="opt">2</button></div><div class="feedback"></div>`,
+  `<h2>Bloque tres</h2><p>Fin de la clase.</p>`
+];
+let i = 0; const c = document.getElementById('contenido');
+function pintar(){
+  c.innerHTML = bloques[i];
+  document.getElementById('ant').disabled = i === 0;
+  document.getElementById('sig').disabled = i === bloques.length - 1;
+  c.querySelectorAll('.opt').forEach((b, k) => b.addEventListener('click', () => {
+    c.querySelectorAll('.opt')[1].classList.add('correct');
+    c.querySelector('.feedback').textContent = 'Porque uno más uno es dos.';
+  }));
+}
+document.getElementById('sig').onclick = () => { if (i < bloques.length - 1) { i++; pintar(); } };
+document.getElementById('ant').onclick = () => { if (i > 0) { i--; pintar(); } };
+pintar();
+</script></body></html>""", encoding="utf-8")
+    if c.buscar_navegador() is None:
+        print("  (sin Edge ni Chrome: se omite)")
+    else:
+        md = ida.leer(interactiva)
+        comprobar(all(f"## Bloque {n}" in md for n in ("uno", "dos", "tres")), "recorre todos los bloques")
+        comprobar("$e^{-st}$" in md and "$$ \\int_0^{\\infty} f(t)\\,dt $$" in md, "conserva las fórmulas LaTeX")
+        comprobar("* 2 ✅" in md and "Porque uno más uno es dos." in md, "marca la respuesta correcta del quiz")
+        comprobar("> **Idea**" in md, "los recuadros salen como cita")
+        comprobar("Siguiente" not in md and "Anterior" not in md, "sin botones de navegación")
+        if fallos:
+            print(md)
+
     print("Nombres de salida")
     usadas = set()
     primera = c.ruta_de_salida(origen, AQUI, ".md", True, usadas)

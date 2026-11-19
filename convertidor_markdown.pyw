@@ -29,6 +29,11 @@ if sys.stderr is None:
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+try:  # arrastrar y soltar archivos desde el Explorador
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+except Exception:  # sin el componente, la app funciona igual (solo con botones)
+    DND_FILES = TkinterDnD = None
+
 from conversores import AMarkdown, DesdeMarkdown, ErrorAlGuardar, explicar_error, ruta_de_salida
 
 TITULO = "Convertidor Markdown"
@@ -69,9 +74,11 @@ class Panel(ttk.Frame):
         self.carpeta = tk.StringVar(value=config.get("carpeta", ""))
         self.formatos = {ext: tk.BooleanVar(value=ext in elegidos) for ext, _ in modo.formatos}
         self.sobrescribir = tk.BooleanVar(value=bool(config.get("sobrescribir", False)))
-        self.estado = tk.StringVar(value="Añade archivos para empezar.")
+        self._admite_soltar = False
+        self.estado = tk.StringVar(value=self._invitacion())
 
         self._construir(m)
+        self.estado.set(self._invitacion())
         self._actualizar_controles()
         self.after(80, self._revisar_cola)
 
@@ -106,6 +113,7 @@ class Panel(ttk.Frame):
         self.tabla.configure(yscrollcommand=barra.set)
         self.tabla.bind("<Double-1>", self._abrir_resultado)
         self.tabla.bind("<Delete>", lambda _e: self._quitar())
+        self._activar_soltar(self.tabla)
 
         botones = ttk.Frame(zona)
         botones.grid(row=0, column=2, sticky="n", padx=(m // 2, 0))
@@ -159,6 +167,47 @@ class Panel(ttk.Frame):
             pie, text=self.modo.boton, style="Principal.TButton", command=self._convertir)
         self.b_convertir.grid(row=1, column=2)
 
+    # ---- arrastrar y soltar -----------------------------------------------
+
+    def _activar_soltar(self, control):
+        if not getattr(self.winfo_toplevel(), "admite_soltar", False):
+            return
+        try:
+            control.drop_target_register(DND_FILES)
+        except tk.TclError:
+            return
+        control.dnd_bind("<<DropEnter>>", lambda e: self._resaltar(True) or e.action)
+        control.dnd_bind("<<DropLeave>>", lambda e: self._resaltar(False) or e.action)
+        control.dnd_bind("<<Drop>>", self._soltar)
+        self._admite_soltar = True
+
+    def _invitacion(self):
+        if self._admite_soltar:
+            return "Añade archivos con los botones o arrástralos a la lista."
+        return "Añade archivos para empezar."
+
+    def _resaltar(self, activo):
+        if activo:
+            self._estado_previo = self.estado.get()
+            self.estado.set("Suelta aquí para añadir los archivos a la lista…")
+        elif getattr(self, "_estado_previo", None) is not None:
+            self.estado.set(self._estado_previo)
+            self._estado_previo = None
+
+    def _soltar(self, evento):
+        self._resaltar(False)
+        if self.trabajando:
+            return evento.action
+        rutas = []
+        for elemento in self.tk.splitlist(evento.data):
+            ruta = Path(elemento)
+            if ruta.is_dir():
+                rutas.extend(sorted(p for p in ruta.iterdir() if p.is_file()))
+            elif ruta.is_file():
+                rutas.append(ruta)
+        self.winfo_toplevel().repartir(rutas, panel=self)
+        return evento.action
+
     # ---- lista de archivos ------------------------------------------------
 
     def _elegir_archivos(self):
@@ -202,7 +251,7 @@ class Panel(ttk.Frame):
             self.origenes.pop(fila, None)
             self.hechos.pop(fila, None)
         self.estado.set(f"{len(self.origenes)} archivo(s) en la lista." if self.origenes
-                        else "Añade archivos para empezar.")
+                        else self._invitacion())
         self._actualizar_controles()
 
     def _vaciar(self):
@@ -212,7 +261,7 @@ class Panel(ttk.Frame):
         self.origenes.clear()
         self.hechos.clear()
         self.progreso.configure(value=0)
-        self.estado.set("Añade archivos para empezar.")
+        self.estado.set(self._invitacion())
         self._actualizar_controles()
 
     # ---- destino ----------------------------------------------------------
@@ -419,6 +468,13 @@ class Panel(ttk.Frame):
 class App(tk.Tk):
     def __init__(self, archivos_iniciales=()):
         super().__init__()
+        self.admite_soltar = False
+        if TkinterDnD is not None:
+            try:
+                TkinterDnD._require(self)      # carga tkdnd: arrastrar y soltar archivos
+                self.admite_soltar = True
+            except Exception:
+                pass
         self.title(TITULO)
         self.escala = self.winfo_fpixels("1i") / 96.0
         self.geometry(f"{int(920 * self.escala)}x{int(680 * self.escala)}")
@@ -448,7 +504,7 @@ class App(tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self._cerrar)
         if archivos_iniciales:
-            self._repartir(Path(a) for a in archivos_iniciales)
+            self.repartir(Path(a) for a in archivos_iniciales)
 
     def _poner_icono(self):
         try:
@@ -470,18 +526,36 @@ class App(tk.Tk):
         estilo.configure("Principal.TButton", font=("Segoe UI", 10, "bold"), padding=(18, 8))
         estilo.configure("TNotebook.Tab", padding=(10, 6))
 
-    def _repartir(self, rutas):
-        """Archivos recibidos al abrir (p. ej. soltados sobre el acceso directo):
-        los .md van a la pestaña inversa; el resto, a la de convertir a Markdown."""
-        a_md, desde_md = [], []
+    def repartir(self, rutas, panel=None):
+        """Archivos soltados en la lista o sobre el acceso directo: los .md van a
+        la pestaña inversa; el resto, a la de convertir a Markdown. Lo que
+        ninguna pestaña sabe convertir se ignora y se avisa."""
+        a_md, desde_md, ignorados = [], [], []
+        compatibles = self.paneles[0].modo.filtro[1]
         for ruta in rutas:
-            (desde_md if ruta.suffix.lower() in (".md", ".markdown") else a_md).append(ruta)
+            extension = ruta.suffix.lower()
+            if extension in (".md", ".markdown"):
+                desde_md.append(ruta)
+            elif extension in compatibles:
+                a_md.append(ruta)
+            else:
+                ignorados.append(ruta)
         self.paneles[0].agregar(a_md)
         self.paneles[1].agregar(desde_md)
-        if desde_md and not a_md:
+        # Mostrar la pestaña que recibió archivos (si fueron las dos, la del gesto).
+        if a_md and desde_md and panel in self.paneles:
+            self.pestanas.select(self.paneles.index(panel))
+        elif desde_md:
             self.pestanas.select(1)
         elif a_md:
             self.pestanas.select(0)
+        if ignorados:
+            nombres = "\n  ".join(r.name for r in ignorados[:8])
+            if len(ignorados) > 8:
+                nombres += f"\n  … y {len(ignorados) - 8} más"
+            messagebox.showinfo(
+                TITULO, "Estos archivos no se pueden convertir y no se añadieron:\n\n  " + nombres,
+                parent=self)
 
     # ---- configuración y cierre -------------------------------------------
 
@@ -528,6 +602,7 @@ REQUISITOS = (
     ("docx", "python-docx"),
     ("openpyxl", "openpyxl"),
     ("bs4", "beautifulsoup4"),
+    ("tkinterdnd2", "tkinterdnd2"),
 )
 
 

@@ -10,6 +10,7 @@ Cada sentido es un "modo" con la misma forma: `preparar()` carga lo pesado,
 cada formato de salida pedido.
 """
 import base64
+import html as html_lib
 import mimetypes
 import os
 import re
@@ -116,6 +117,11 @@ class AMarkdown:
             self._conversor = MarkItDown(enable_plugins=False)
 
     def leer(self, origen):
+        if Path(origen).suffix.lower() in (".html", ".htm", ".xhtml"):
+            texto = html_a_markdown(origen)
+            if not texto.strip():
+                raise SinTexto()
+            return texto
         resultado = self._conversor.convert(str(origen))
         texto = getattr(resultado, "markdown", None) or getattr(resultado, "text_content", "") or ""
         if not texto.strip():
@@ -124,6 +130,198 @@ class AMarkdown:
 
     def escribir(self, texto, origen, destino, extension):
         destino.write_text(texto, encoding="utf-8")
+
+
+# ---- HTML -> Markdown (también páginas hechas con JavaScript) -------------
+# Muchas páginas (p. ej. las clases interactivas por bloques) no traen el
+# texto escrito en el HTML: lo genera JavaScript al abrirlas. Para verlas
+# como las ve una persona se abren con Edge/Chrome sin ventana, con
+# recorrer_pagina.js inyectado, que pasa por todos los bloques y revela las
+# respuestas de los quizzes. Las fórmulas LaTeX (\( \), \[ \], $$) se
+# conservan tal cual para que el Markdown las muestre como fórmulas.
+
+SCRIPT_RECORRIDO = Path(__file__).with_name("recorrer_pagina.js")
+# Scripts que convierten el LaTeX en dibujos: se quitan para conservar el LaTeX.
+_SCRIPTS_DE_FORMULAS = re.compile(
+    r"<script\b[^>]*\bsrc=[\"'][^\"']*(mathjax|katex|auto-render)[^\"']*[\"'][^>]*>\s*</script>",
+    re.I)
+_CLASE_AVISO = re.compile(
+    r"analog|warn|alert|note|nota|tip|hint|callout|info|important|highlight|ojo|"
+    r"danger|caution|remember|recuerda|key|clave|ok-box|success|error-box|box|card-note", re.I)
+_CLASE_EXPLICACION = re.compile(r"feedback|explica|solution|solucion|answer|respuesta|retro", re.I)
+_CLASE_CORRECTA = re.compile(r"(^|[\s_-])(correct|correcta|right|ok)($|[\s_-])", re.I)
+_NAVEGACION = re.compile(
+    r"^(siguiente|anterior|next|prev(ious)?|volver|atrás|continuar|inicio|fin)\b|[←→‹›«»◀▶✓]", re.I)
+_FORMULA = re.compile(r"\\\[(.+?)\\\]|\$\$(.+?)\$\$|\\\((.+?)\\\)", re.S)
+
+
+def renderizar_html(origen, html):
+    """HTML tal como queda tras ejecutar su JavaScript, o None si no se puede."""
+    navegador = buscar_navegador()
+    if navegador is None or not SCRIPT_RECORRIDO.is_file():
+        return None
+    script = SCRIPT_RECORRIDO.read_text(encoding="utf-8")
+    pagina = _SCRIPTS_DE_FORMULAS.sub("", html)
+    # Las rutas relativas (imágenes, scripts propios) se resuelven desde la carpeta original.
+    base = f'<base href="{Path(origen).resolve().parent.as_uri()}/">'
+    if re.search(r"<head[^>]*>", pagina, re.I):
+        pagina = re.sub(r"(<head[^>]*>)", lambda m: m.group(1) + base, pagina, count=1, flags=re.I)
+    else:
+        pagina = base + pagina
+    inyectado = f"<script>{script}</script>"
+    if re.search(r"</body\s*>", pagina, re.I):
+        pagina = re.sub(r"</body\s*>", lambda m: inyectado + m.group(0), pagina, count=1, flags=re.I)
+    else:
+        pagina += inyectado
+    temporal = Path(tempfile.mkdtemp(prefix="convmd_"))
+    try:
+        fuente = temporal / "pagina.html"
+        fuente.write_text(pagina, encoding="utf-8")
+        try:
+            resultado = subprocess.run(
+                [str(navegador), "--headless=new", "--disable-gpu", "--no-first-run",
+                 "--disable-extensions", "--mute-audio", f"--user-data-dir={temporal / 'perfil'}",
+                 "--virtual-time-budget=60000", "--dump-dom", fuente.as_uri()],
+                capture_output=True, timeout=180, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        salida = resultado.stdout.decode("utf-8", "replace")
+        return salida if "__convmd__" in salida else None
+    finally:
+        shutil.rmtree(temporal, ignore_errors=True)
+
+
+def _preparar_html(html):
+    """Ordena el HTML para que salga un Markdown legible. Devuelve (html, fórmulas)."""
+    from bs4 import BeautifulSoup
+
+    sopa = BeautifulSoup(html, "html.parser")
+    titulo = sopa.title.get_text(" ", strip=True) if sopa.title else ""
+    principal = sopa.find(id="__convmd__")
+    recorrida = principal is not None and principal.has_attr("data-pasos")
+    raiz = principal or sopa.body or sopa
+    for basura in raiz.find_all(["script", "style", "noscript", "template", "link", "meta"]):
+        basura.decompose()
+
+    # KaTeX o MathML ya dibujados: recuperar el LaTeX original si viene anotado.
+    for nota in raiz.find_all("annotation", attrs={"encoding": "application/x-tex"}):
+        contenedor = nota.find_parent(class_="katex-display") or nota.find_parent(class_="katex") \
+            or nota.find_parent("math")
+        if contenedor is not None:
+            bloque = contenedor.name == "math" and contenedor.get("display") == "block" \
+                or "katex-display" in (contenedor.get("class") or [])
+            tex = nota.get_text()
+            contenedor.replace_with(f"\\[{tex}\\]" if bloque else f"\\({tex}\\)")
+
+    # Opciones de quiz (varios botones juntos) -> lista, marcando la correcta.
+    for grupo in list(raiz.find_all(True)):
+        hijos = [h for h in grupo.find_all(["button", "input"], recursive=False)
+                 if h.name == "button" or h.get("type") == "button"]
+        if len(hijos) < 2 or grupo.find_parent(attrs={"data-convmd": "lista"}):
+            continue
+        lista = sopa.new_tag("ul")
+        lista["data-convmd"] = "lista"
+        for boton in hijos:
+            item = sopa.new_tag("li")
+            for parte in list(boton.contents):
+                item.append(parte.extract())
+            if boton.name == "input":
+                item.append(boton.get("value", ""))
+            clases = " ".join(boton.get("class") or [])
+            if _CLASE_CORRECTA.search(clases) and "incorrect" not in clases.lower():
+                item.append(" ✅")
+            lista.append(item)
+        hijos[0].insert_before(lista)
+        for boton in hijos:
+            boton.decompose()
+    # Botones sueltos de navegación (Siguiente, Anterior…) no aportan nada.
+    for boton in raiz.find_all("button"):
+        if _NAVEGACION.search(boton.get_text(" ", strip=True)) or not boton.get_text(strip=True):
+            boton.decompose()
+
+    # Recuadros de explicación, avisos y analogías -> citas (>).
+    for caja in list(raiz.find_all(["div", "aside", "section", "p"])):
+        if caja.parent is None or caja.find_parent("blockquote"):
+            continue
+        clases = " ".join(caja.get("class") or [])
+        if not clases or "formula" in clases.lower():
+            continue
+        es_explicacion = bool(_CLASE_EXPLICACION.search(clases))
+        if not es_explicacion and not _CLASE_AVISO.search(clases):
+            continue
+        if not caja.get_text(strip=True):
+            caja.decompose()
+            continue
+        if caja.find(["h1", "h2", "table"]) or len(caja.get_text()) > 3000:
+            continue            # es una sección entera, no un recuadro
+        primero = next((h for h in caja.children if getattr(h, "name", None) or str(h).strip()), None)
+        if getattr(primero, "name", None) in ("b", "strong"):
+            primero.insert_after(sopa.new_tag("br"))
+        elif es_explicacion:
+            etiqueta = sopa.new_tag("strong")
+            etiqueta.string = "Explicación:"
+            caja.insert(0, " ")
+            caja.insert(0, etiqueta)
+        caja.name = "blockquote"
+        caja.attrs = {}
+
+    # Etiquetas pequeñas sobre los títulos (p. ej. «Definición») -> cursiva.
+    for etiqueta in raiz.find_all(class_=re.compile(r"eyebrow|kicker|overline|subtitle|tag", re.I)):
+        if etiqueta.name in ("div", "span", "p") and etiqueta.get_text(strip=True) \
+                and not etiqueta.find(["div", "p", "ul", "ol", "table"]):
+            texto = etiqueta.get_text(" ", strip=True)
+            etiqueta.clear()
+            cursiva = sopa.new_tag("em")
+            cursiva.string = texto
+            etiqueta.append(cursiva)
+            etiqueta.name = "p"
+
+    cuerpo = raiz.decode_contents() if raiz is not sopa else str(sopa)
+
+    # Fórmulas: se apartan con una marca para que el conversor no las toque.
+    formulas = []
+
+    def apartar(m):
+        bloque = m.group(1) is not None or m.group(2) is not None
+        tex = next(g for g in m.groups() if g is not None)
+        formulas.append((bloque, html_lib.unescape(tex)))
+        return f"CONVMDFORMULA{len(formulas) - 1:05d}X"
+
+    cuerpo = _FORMULA.sub(apartar, cuerpo)
+    primer_titulo = raiz.find(["h1", "h2"])
+    repetido = primer_titulo is not None and primer_titulo.get_text(" ", strip=True) == titulo
+    if titulo and recorrida and not repetido:
+        cuerpo = f"<h1>{html_lib.escape(titulo)}</h1>" + cuerpo
+    return f"<html><head><title>{html_lib.escape(titulo)}</title></head><body>{cuerpo}</body></html>", formulas
+
+
+def html_a_markdown(origen):
+    """Convierte un archivo HTML a Markdown, ejecutando antes su JavaScript."""
+    from markitdown.converters import HtmlConverter
+
+    html = leer_texto(origen)
+    renderizado = None
+    if re.search(r"<script\b", html, re.I):
+        renderizado = renderizar_html(origen, html)
+    limpio, formulas = _preparar_html(renderizado or _SCRIPTS_DE_FORMULAS.sub("", html))
+    texto = HtmlConverter().convert_string(limpio).markdown or ""
+
+    def devolver(m):
+        bloque, tex = formulas[int(m.group(1))]
+        tex = tex.strip()
+        if bloque:
+            return "$$ " + re.sub(r"\s*\n\s*", " ", tex) + " $$"
+        return "$" + tex + "$"
+
+    texto = re.sub(r"CONVMDFORMULA(\d{5})X", devolver, texto)
+    texto = re.sub(r"(?m)^>[ \t]{2,}", "> ", texto)
+    # Título en negrita de un recuadro: en su propia línea dentro de la cita.
+    texto = re.sub(r"(?m)^(> \*\*[^\n]*\*\*)[ \t]*\n> ", r"\1\n>\n> ", texto)
+    texto = re.sub(r"\$\$\n\$\$", "$$\n\n$$", texto)     # cada fórmula grande en su párrafo
+    texto = re.sub(r"[ \t]+\n", "\n", texto)
+    texto = re.sub(r"\n{3,}", "\n\n", texto)
+    return texto.strip() + "\n"
 
 
 # --------------------------------------------------------------------------
